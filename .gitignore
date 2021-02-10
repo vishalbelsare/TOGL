@@ -2,6 +2,19 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.DS_store
+
+# Data
+/data/MNIST
+/data/CIFAR
+/data/PATTERN
+/data/CLUSTER
+/data/ENZYMES
+/data/ENZYMES_legacy
+/data/PROTEINS
+/data/PROTEINS_legacy
+/data/DD
+/data/DD_legacy
 
 # C extensions
 *.so
