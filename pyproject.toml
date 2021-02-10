@@ -26,7 +26,7 @@ torch-geometric = {version = "==1.6.3", allow-prereleases = true}  # Depends on 
 # ]
 pytorch-lightning = "^1.1.3"
 wandb = "^0.10.12"
-torch_persistent_homology = { path = "repos/torch_persistent_homology", develop = true }
+torch_persistent_homology = { path = "repos/torch_persistent_homology", develop = false }
 giotto-tda = "^0.4.0"
 python-igraph = "^0.8.3"
 networkx = "^2.5"
