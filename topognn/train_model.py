@@ -1,16 +1,18 @@
 #!/usr/bin/env python
-"""Train a model."""
+"""Train a model using the same routine as used in the GNN Benchmarks dataset."""
 import argparse
 import sys
 
-import torch
 import pytorch_lightning as pl
-from pytorch_lightning.loggers import WandbLogger
-from pytorch_lightning.callbacks.early_stopping import EarlyStopping
+from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
+from pytorch_lightning.callbacks import LearningRateMonitor, Callback
+from pytorch_lightning.utilities import rank_zero_info
+from pytorch_lightning.utilities.seed import seed_everything
 
+from topognn.cli_utils import str2bool
+import topognn.data_utils as topo_data
 import topognn.models as models
-import topognn.data_utils as datasets
 
 MODEL_MAP = {
     'TopoGNN': models.FiltrationGCNModel,
@@ -20,26 +22,65 @@ MODEL_MAP = {
     'SimpleTopoGNN': models.SimpleTopoGNNModel
 }
 
-#DATASET_MAP = {
-#    'IMDB-BINARY': datasets.IMDB_Binary,
-#    'PROTEINS': datasets.Proteins,
-#    'PROTEINS_full': datasets.Proteins_full,
-#    'ENZYMES': datasets.Enzymes,
-#    'DD': datasets.DD,
-#    'MNIST': datasets.MNIST,
-#    'CIFAR10': datasets.CIFAR10,
-#    'PATTERN': datasets.PATTERN,
-#    'CLUSTER': datasets.CLUSTER,
-#    'Necklaces': datasets.Necklaces,
-#    'Cycles': datasets.Cycles
-#}
+
+class StopOnMinLR(Callback):
+    """Callback to stop training as soon as the min_lr is reached.
+
+    This is to mimic the training routine from the publication
+    `Benchmarking Graph Neural Networks, V. P. Dwivedi, K. Joshi et al.`
+    """
+
+    def __init__(self, min_lr):
+        super().__init__()
+        self.min_lr = min_lr
+
+    def on_train_epoch_start(self, trainer, *args, **kwargs):
+        """Check if lr is lower than min_lr.
+
+        This is the closest to after the update of the lr where we can
+        intervene via callback. The lr logger also uses this hook to log
+        learning rates.
+        """
+        for scheduler in trainer.lr_schedulers:
+            opt = scheduler['scheduler'].optimizer
+            param_groups = opt.param_groups
+            for pg in param_groups:
+                lr = pg.get('lr')
+                if lr < self.min_lr:
+                    trainer.should_stop = True
+                    rank_zero_info(
+                        'lr={} is lower than min_lr={}. '
+                        'Stopping training.'.format(lr, self.min_lr)
+                    )
+
+
+def get_logger(name, args):
+    if name == 'wandb':
+        return WandbLogger(
+            name=f"{args.model}_{args.dataset}",
+            project="topo_gnn",
+            entity="topo_gnn",
+            log_model=True,
+            tags=[args.model, args.dataset]
+        )
+    if name == 'tensorboard':
+        return TensorBoardLogger(
+            'logs',
+            name=f"{args.model}_{args.dataset}"
+        )
+    else:
+        raise NotImplementedError()
 
 
 def main(model_cls, dataset_cls, args):
+    args.training_seed = seed_everything(args.training_seed)
     # Instantiate objects according to parameters
     dataset = dataset_cls(**vars(args))
     dataset.prepare_data()
 
+    logger_name = args.logger
+    gpu = args.gpu
+    del args.logger, args.gpu  # Do not need to be tracked as a hyperparameter
     model = model_cls(
         **vars(args),
         num_node_features=dataset.node_attributes,
@@ -50,62 +91,40 @@ def main(model_cls, dataset_cls, args):
     print(model.hparams)
 
     # Loggers and callbacks
-    wandb_logger = WandbLogger(
-        name=f"{args.model}_{args.dataset}",
-        project="topo_gnn",
-        entity="topo_gnn",
-        log_model=True,
-        tags=[args.model, args.dataset]
-    )
-    early_stopping_cb = EarlyStopping(monitor="val_acc", patience=100)
+    logger = get_logger(logger_name, args)
+    log_dir = getattr(logger, 'log_dir', False) or logger.experiment.dir
+    stop_on_min_lr_cb = StopOnMinLR(args.min_lr)
+    lr_monitor = LearningRateMonitor('epoch')
     checkpoint_cb = ModelCheckpoint(
-        dirpath=wandb_logger.experiment.dir,
-        monitor='val_acc',
-        mode='max',
+        dirpath=log_dir,
+        monitor='val_loss',
+        mode='min',
         verbose=True
     )
 
-    GPU_AVAILABLE = torch.cuda.is_available() and torch.cuda.device_count() > 0
     trainer = pl.Trainer(
-        gpus=-1 if GPU_AVAILABLE else None,
-        logger=wandb_logger,
+        gpus=gpu,
+        logger=logger,
         log_every_n_steps=5,
         max_epochs=args.max_epochs,
-        callbacks=[early_stopping_cb, checkpoint_cb]
+        callbacks=[stop_on_min_lr_cb, checkpoint_cb, lr_monitor]
     )
     trainer.fit(model, datamodule=dataset)
-    checkpoint_path = checkpoint_cb.best_model_path
-    trainer2 = pl.Trainer(logger=False)
-
-    model = model_cls.load_from_checkpoint(
-        checkpoint_path)
-    val_results = trainer2.test(
-        model,
-        test_dataloaders=dataset.val_dataloader()
-    )[0]
-
-    val_results = {
-        name.replace('test', 'best_val'): value
-        for name, value in val_results.items()
-    }
-
-    test_results = trainer2.test(
-        model,
-        test_dataloaders=dataset.test_dataloader()
-    )[0]
-
-    for name, value in {**val_results, **test_results}.items():
-        wandb_logger.experiment.summary[name] = value
+    test_results = trainer.test(test_dataloaders=dataset.test_dataloader())[0]
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('--model', type=str, choices=MODEL_MAP.keys())
-    parser.add_argument('--dataset', type=str, choices=DATASET_MAP.keys())
+    parser.add_argument('--dataset', type=str,
+                        choices=topo_data.dataset_map_dict().keys())
+    parser.add_argument('--training_seed', type=int, default=None)
     parser.add_argument('--max_epochs', type=int, default=1000)
-    parser.add_argument('--dummy_var', type=int, default=0)
-    parser.add_argument("--paired", type = str2bool, default=False)
-    parser.add_argument("--merged", type = str2bool, default=False)
+    parser.add_argument("--paired", type=str2bool, default=False)
+    parser.add_argument("--merged", type=str2bool, default=False)
+    parser.add_argument(
+        '--logger', choices=['wandb', 'tensorboard'], default='tensorboard')
+    parser.add_argument('--gpu', default=None, type=str)
 
     partial_args, _ = parser.parse_known_args()
 
@@ -113,8 +132,7 @@ if __name__ == '__main__':
         parser.print_usage()
         sys.exit(1)
     model_cls = MODEL_MAP[partial_args.model]
-    #dataset_cls = DATASET_MAP[partial_args.dataset]
-    dataset_cls = topo_data.get_dataset_class(partial_args)
+    dataset_cls = topo_data.get_dataset_class(**vars(partial_args))
 
     parser = model_cls.add_model_specific_args(parser)
     parser = dataset_cls.add_dataset_specific_args(parser)
