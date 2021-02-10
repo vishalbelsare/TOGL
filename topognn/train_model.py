@@ -15,11 +15,8 @@ import topognn.data_utils as topo_data
 import topognn.models as models
 
 MODEL_MAP = {
-    'TopoGNN': models.FiltrationGCNModel,
+    'TopoGNN': models.TopoGNNModel,
     'GCN': models.GCNModel,
-    'LargerGCN': models.LargerGCNModel,
-    'LargerTopoGNN': models.LargerTopoGNNModel,
-    'SimpleTopoGNN': models.SimpleTopoGNNModel
 }
 
 
