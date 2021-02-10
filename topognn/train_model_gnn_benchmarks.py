@@ -3,16 +3,24 @@
 import argparse
 import sys
 
-import torch
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 from pytorch_lightning.callbacks import LearningRateMonitor, Callback
 from pytorch_lightning.utilities import rank_zero_info
-import topognn.data_utils as topo_data
-from topognn.train_model import MODEL_MAP
 from pytorch_lightning.utilities.seed import seed_everything
+
 from topognn.cli_utils import str2bool
+import topognn.data_utils as topo_data
+import topognn.models as models
+
+MODEL_MAP = {
+    'TopoGNN': models.FiltrationGCNModel,
+    'GCN': models.GCNModel,
+    'LargerGCN': models.LargerGCNModel,
+    'LargerTopoGNN': models.LargerTopoGNNModel,
+    'SimpleTopoGNN': models.SimpleTopoGNNModel
+}
 
 
 class StopOnMinLR(Callback):
@@ -71,7 +79,8 @@ def main(model_cls, dataset_cls, args):
     dataset.prepare_data()
 
     logger_name = args.logger
-    del args.logger  # This does not need to be tracked as a hyperparameter
+    gpu = args.gpu
+    del args.logger, args.gpu  # Do not need to be tracked as a hyperparameter
     model = model_cls(
         **vars(args),
         num_node_features=dataset.node_attributes,
@@ -93,9 +102,8 @@ def main(model_cls, dataset_cls, args):
         verbose=True
     )
 
-    GPU_AVAILABLE = torch.cuda.is_available() and torch.cuda.device_count() > 0
     trainer = pl.Trainer(
-        gpus=-1 if GPU_AVAILABLE else None,
+        gpus=gpu,
         logger=logger,
         log_every_n_steps=5,
         max_epochs=args.max_epochs,
@@ -116,6 +124,7 @@ if __name__ == '__main__':
     parser.add_argument("--merged", type=str2bool, default=False)
     parser.add_argument(
         '--logger', choices=['wandb', 'tensorboard'], default='tensorboard')
+    parser.add_argument('--gpu', default=None, type=str)
 
     partial_args, _ = parser.parse_known_args()
 
