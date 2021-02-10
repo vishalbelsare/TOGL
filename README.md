@@ -112,3 +112,7 @@ poetry run topognn/train_model.py --model TopoGNN --dataset ENZYMES --fake True 
 # GCN on ENZYMES
 poetry run topognn/train_model.py --model GCN --dataset ENZYMES --depth 4 --batch_size 20 --lr 0.0007 --lr_patience 25 --min_lr 0.000001
 ```
+
+## Results used for plots
+The results and data used to plot our figures can be found in the folder
+`plots_data`.
