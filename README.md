@@ -9,6 +9,7 @@ GNNs".  This repository requires either python 3.7 or 3.8 to be installed.
 curl -sSL https://raw.githubusercontent.com/python-poetry/poetry/master/get-poetry.py | python -
 # Create venv and install dependencies of project
 poetry install
+# In case any errors occur, please rerun `poetry install`
 poetry run install_deps_cpu  # or of course install_deps_cuXXX for GPU support
 # Train TopoGNN on ENZYMES for 10 epochs
 poetry run python topognn/train_model.py --model TopoGNN --dataset ENZYMES --max_epochs 10
@@ -23,6 +24,7 @@ install the dependencies of the repository:
 
 ```bash
 $ poetry install
+# If any errors occur please rerun the command `poetry install`
 ```
 
 Due to some incompatibilities between `poetry` and `torch_geometric` (which was
