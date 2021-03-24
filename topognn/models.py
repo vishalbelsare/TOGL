@@ -11,7 +11,7 @@ from torch_geometric.nn import global_mean_pool, global_add_pool
 
 from topognn import Tasks
 from topognn.cli_utils import str2bool
-from topognn.layers import GCNLayer, GINLayer, CoordfnTopologyLayer, SetfnTopologyLayer
+from topognn.layers import GCNLayer, GINLayer, CoordfnTopologyLayer, SetfnTopologyLayer, GFLReadout
 from topognn.metrics import WeightedAccuracy
 
 
@@ -21,7 +21,7 @@ import wandb
 class GCNModel(pl.LightningModule):
     def __init__(self, hidden_dim, depth, num_node_features, num_classes, task,
                  lr=0.001, dropout_p=0.2, GIN=False, batch_norm=False,
-                 residual=False, train_eps=True,
+                 residual=False, train_eps=True, gfl_readout = False,
                  **kwargs):
         super().__init__()
         self.save_hyperparameters()
@@ -32,18 +32,22 @@ class GCNModel(pl.LightningModule):
                 return GINLayer(
                     hidden_dim, hidden_dim, F.relu, dropout_p, batch_norm,
                     train_eps=train_eps)
-            graph_pooling_operation = global_add_pool
+            graph_pooling_operation = lambda x,y : global_add_pool(x,y.batch)
         else:
             def build_gnn_layer():
                 return GCNLayer(
                     hidden_dim, hidden_dim, F.relu, dropout_p, batch_norm)
-            graph_pooling_operation = global_mean_pool
+            graph_pooling_operation = lambda x,y : global_mean_pool(x,y.batch)
 
         self.layers = nn.ModuleList([
             build_gnn_layer() for _ in range(depth)])
 
         if task is Tasks.GRAPH_CLASSIFICATION:
-            self.pooling_fun = graph_pooling_operation
+            if gfl_readout:
+                self.pooling_fun = GFLReadout(hidden_dim)
+            else:
+                self.pooling_fun = graph_pooling_operation
+
         elif task is Tasks.NODE_CLASSIFICATION:
             def fake_pool(x, batch):
                 return x
@@ -55,7 +59,10 @@ class GCNModel(pl.LightningModule):
             dim_before_class = hidden_dim + \
                 kwargs["dim1_out_dim"]  # SimpleTopoGNN with dim1
         else:
-            dim_before_class = hidden_dim
+            if gfl_readout:
+                dim_before_class = 200
+            else:
+                dim_before_class = hidden_dim
 
         self.classif = torch.nn.Sequential(
             nn.Linear(dim_before_class, hidden_dim // 2),
@@ -63,7 +70,9 @@ class GCNModel(pl.LightningModule):
             nn.Linear(hidden_dim // 2, hidden_dim // 4),
             nn.ReLU(),
             nn.Linear(hidden_dim // 4, num_classes)
-        )
+            )
+
+
         self.task = task
 
         if task is Tasks.GRAPH_CLASSIFICATION:
@@ -115,7 +124,7 @@ class GCNModel(pl.LightningModule):
         for layer in self.layers:
             x = layer(x, edge_index=edge_index, data=data)
 
-        x = self.pooling_fun(x, data.batch)
+        x = self.pooling_fun(x, data)
         x = self.classif(x)
 
         return x
@@ -186,6 +195,7 @@ class GCNModel(pl.LightningModule):
         parser.add_argument('--train_eps', type=str2bool, default=True)
         parser.add_argument('--batch_norm', type=str2bool, default=True)
         parser.add_argument('--residual', type=str2bool, default=True)
+        parser.add_argument('--gfl_readout',type=str2bool, default=False)
         return parser
 
 
@@ -221,6 +231,7 @@ class TopoGNNModel(GCNModel):
         self.dim1 = kwargs["dim1"]
         self.tanh_filtrations = tanh_filtrations
         self.deepset_type = deepset_type
+        self.depth = depth
 
         self.deepset = deepset
         if self.deepset:
@@ -286,23 +297,26 @@ class TopoGNNModel(GCNModel):
 
         x = self.embedding(x)
 
-        if self.early_topo:
-            # Topo layer as the second layer
-            x = self.layers[0](x, edge_index=edge_index, data=data)
-            x, x_dim1, filtration = self.topo1(x, data, return_filtration)
-            x = F.dropout(x, p=self.hparams.dropout_p, training=self.training)
-            for layer in self.layers[1:]:
-                x = layer(x, edge_index=edge_index, data=data)
+        if self.depth==0:
+            x = x, x_dim1, filtration = self.topo1(x, data, return_filtration)
         else:
-            # Topo layer as the second to last layer
-            for layer in self.layers[:-1]:
-                x = layer(x, edge_index=edge_index, data=data)
-            x, x_dim1, filtration = self.topo1(x, data, return_filtration)
-            x = F.dropout(x, p=self.hparams.dropout_p, training=self.training)
-            x = self.layers[-1](x, edge_index=edge_index, data=data)
+            if self.early_topo:
+                # Topo layer as the second layer
+                x = self.layers[0](x, edge_index=edge_index, data=data)
+                x, x_dim1, filtration = self.topo1(x, data, return_filtration)
+                x = F.dropout(x, p=self.hparams.dropout_p, training=self.training)
+                for layer in self.layers[1:]:
+                    x = layer(x, edge_index=edge_index, data=data)
+            else:
+                # Topo layer as the second to last layer
+                for layer in self.layers[:-1]:
+                    x = layer(x, edge_index=edge_index, data=data)
+                x, x_dim1, filtration = self.topo1(x, data, return_filtration)
+                x = F.dropout(x, p=self.hparams.dropout_p, training=self.training)
+                x = self.layers[-1](x, edge_index=edge_index, data=data)
 
         # Pooling
-        x = self.pooling_fun(x, data.batch)
+        x = self.pooling_fun(x, data)
 
         # Aggregating the dim1 topo info if dist_dim1 == False
         if x_dim1 is not None:

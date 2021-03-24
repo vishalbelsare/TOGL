@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, GINConv
+from torch_geometric.nn import GCNConv, GINConv, global_add_pool
 from torch_scatter import scatter
 from torch_persistent_homology.persistent_homology_cpu import (
     compute_persistence_homology_batched_mt,
@@ -10,6 +10,7 @@ from torch_persistent_homology.persistent_homology_cpu import (
 
 import topognn.coord_transforms as coord_transforms
 from topognn.data_utils import remove_duplicate_edges
+
 
 
 class GCNLayer(nn.Module):
@@ -513,3 +514,62 @@ class SetfnTopologyLayer(nn.Module):
             x = self.out(torch.cat([x, x0], dim=-1))
 
         return x, x1, filtration
+
+class GFLReadout(nn.Module):
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.filtrations = nn.Sequential(nn.Linear(hidden_dim,hidden_dim),nn.ReLU(),nn.Linear(hidden_dim,1),nn.Sigmoid())
+        
+        self.coord_transform0 = coord_transforms.RationalHat_transform(input_dim = 2, output_dim = 100)
+        self.coord_transform1 = coord_transforms.RationalHat_transform(input_dim = 1, output_dim = 100)
+
+    def forward(self,x, data):
+
+        # Remove the duplicate edges
+        data = remove_duplicate_edges(data)
+
+        vertex_slices = torch.Tensor(data.__slices__['x']).cpu().long()
+        edge_slices = torch.Tensor(data.__slices__['edge_index']).cpu().long()
+        batch = data.batch
+       
+        coord_funs_out0 = 0
+        coord_funs_out1 = 0
+        
+        for factor in [-1,1]:
+            
+            edge_index = data.edge_index
+            filtered_v = factor * self.filtrations(x)
+       
+            filtered_e, _ = torch.max(
+            torch.stack((filtered_v[edge_index[0]], filtered_v[edge_index[1]])), axis=0
+            )
+
+            filtered_v = filtered_v.transpose(1, 0).cpu().contiguous()
+            filtered_e = filtered_e.transpose(1, 0).cpu().contiguous()
+            edge_index = edge_index.cpu().transpose(1, 0).contiguous()
+
+            persistence0_new, persistence1_new = compute_persistence_homology_batched_mt(
+            filtered_v, filtered_e, edge_index, vertex_slices, edge_slices
+        )
+            persistence0_new = factor * persistence0_new
+            persistence1_new = factor * persistence1_new
+            
+            mask_pers1 = (persistence1_new!=0).any(-1)[0]
+            batch_edges = torch.repeat_interleave(torch.arange(len(data.y)), edge_slices[1:]-edge_slices[:-1])
+            batch_pers1 = batch_edges[mask_pers1]
+        
+            coord_mapped_0 = self.coord_transform0(persistence0_new[0])
+            coord_mapped_1 = self.coord_transform1(persistence1_new[0][mask_pers1][:,0].unsqueeze(-1))
+
+        
+            coord_funs_out0 += (global_add_pool(coord_mapped_0,data.batch, size = len(data.y)))
+            coord_funs_out1 += (global_add_pool(coord_mapped_1,batch_pers1, size = len(data.y)))
+
+        #if coord_funs_out1.shape[-1]!=coord_funs_out0.shape[-1]:
+        #    import ipdb; ipdb.set_trace()
+        
+        graph_embedding = torch.cat((coord_funs_out0, coord_funs_out1),-1)
+        return graph_embedding
+
+
