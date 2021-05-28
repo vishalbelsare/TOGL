@@ -1,6 +1,6 @@
 # Topological Graph Neural Networks
 
-This repository contains the code for the ICML 2021 submission "Topological
+This repository contains the code for the NeurIPS 2021 submission "Topological
 GNNs".  This repository requires either python 3.7 or 3.8 to be installed.
 
 ## Quickstart
